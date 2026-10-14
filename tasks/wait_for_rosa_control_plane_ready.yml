@@ -6,27 +6,19 @@
   delay: "{{ 30 if delay is undefined else delay|int }}"
   ignore_errors: true
 
-- name: Get ROSA Control Plane full status on failure
-  shell: >
-    oc get rosacontrolplane {{ cluster_name }} -n {{ rosa_hcp_namespace | default('ns-rosa-hcp') }}
-    -o json | jq -r '{
-      ready: .status.ready,
-      failureReason: (.status.failureReason // null),
-      failureMessage: (.status.failureMessage // null),
-      conditions: [(.status.conditions // [])[] | {type, status, reason, message}]
-    }'
-  register: rcp_full_status
-  ignore_errors: true
-  when: not (rcp_status.stdout | bool)
-
-- name: Get recent events for ROSA Control Plane on failure
-  shell: >
-    oc get events -n {{ rosa_hcp_namespace | default('ns-rosa-hcp') }}
-    --field-selector involvedObject.name={{ cluster_name }}
-    --sort-by='.lastTimestamp' -o json 2>/dev/null |
-    jq -r '[.items[-5:][] | "\(.lastTimestamp) \(.type) \(.reason): \(.message)"] | .[]'
-  register: rcp_events
-  ignore_errors: true
+- name: Collect sanitized ROSA provisioning evidence before teardown
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - "{{ AUTOMATION_PATH | default(playbook_dir ~ '/..') }}/scripts/rosa_provisioning_diagnostics.py"
+      - --cluster
+      - "{{ cluster_name }}"
+      - --namespace
+      - "{{ rosa_hcp_namespace | default('ns-rosa-hcp') }}"
+  register: rcp_diagnostics
+  changed_when: false
+  failed_when: false
+  no_log: true
   when: not (rcp_status.stdout | bool)
 
 - name: Fail if ROSA Control Plane did not become ready
@@ -34,14 +26,8 @@
     msg: |
       ROSA HCP cluster did not become ready within the timeout period.
 
-      Status:
-      {{ rcp_full_status.stdout | default('Unable to fetch status', true) }}
-
-      Recent events:
-      {{ rcp_events.stdout | default('No events found', true) }}
-
-      For full details:
-      oc describe rosacontrolplane {{ cluster_name }} -n {{ rosa_hcp_namespace | default('ns-rosa-hcp') }}
+      Sanitized provisioning evidence (captured before teardown):
+      {{ rcp_diagnostics.stdout if rcp_diagnostics.rc | default(1) == 0 else 'Diagnostics unavailable; readiness failure unchanged' }}
   when: not (rcp_status.stdout | bool)
 
 - name: Print the ROSA control plane is ready
