@@ -16,6 +16,13 @@ CONDITION_TYPES = {
     "ROSARoleConfigReady",
 }
 CONDITION_STATUSES = {"True", "False", "Unknown"}
+CONDITION_REASONS = {
+    "ReconciliationFailed",
+    "DeletionFailed",
+    "InvalidConfiguration",
+    "ROSARoleConfigNotReady",
+    "ROSARoleConfigNotFound",
+}
 
 
 def allowed(value, choices):
@@ -37,7 +44,7 @@ def integer(value):
 
 
 def sanitize(control_plane, events):
-    """Project known fields only; omit messages, reasons, identities and specs."""
+    """Project known fields only; omit free-form text, identities and specs."""
     status = control_plane.get("status", {})
     metadata = control_plane.get("metadata", {})
     uid = metadata.get("uid")
@@ -63,6 +70,7 @@ def sanitize(control_plane, events):
             {
                 "type": allowed(condition.get("type"), CONDITION_TYPES),
                 "status": allowed(condition.get("status"), CONDITION_STATUSES),
+                "reason": allowed(condition.get("reason"), CONDITION_REASONS),
                 "lastTransitionTime": timestamp(condition.get("lastTransitionTime")),
             }
             for condition in conditions[:32]
@@ -71,6 +79,7 @@ def sanitize(control_plane, events):
         "events": [
             {
                 "type": allowed(event.get("type"), {"Normal", "Warning"}),
+                "reason": allowed(event.get("reason"), CONDITION_REASONS),
                 "count": integer(event.get("count")),
                 "firstTimestamp": timestamp(event.get("firstTimestamp")),
                 "lastTimestamp": timestamp(event.get("lastTimestamp")),
@@ -98,6 +107,10 @@ def collect(cluster, namespace):
     except (OSError, subprocess.SubprocessError, ValueError):
         return {"collection": "control-plane-unavailable"}
     try:
+        evidence = sanitize(control_plane, {"items": []})
+    except (AttributeError, TypeError, ValueError):
+        return {"collection": "invalid-response"}
+    try:
         events = get_json(
             [
                 "get",
@@ -109,15 +122,10 @@ def collect(cluster, namespace):
                 "--sort-by=.lastTimestamp",
             ]
         )
-        event_collection = "collected"
-    except (OSError, subprocess.SubprocessError, ValueError):
-        events = {"items": []}
-        event_collection = "unavailable"
-    try:
-        evidence = sanitize(control_plane, events)
-    except (AttributeError, TypeError, ValueError):
-        return {"collection": "invalid-response"}
-    evidence["eventCollection"] = event_collection
+        evidence["events"] = sanitize(control_plane, events)["events"]
+        evidence["eventCollection"] = "collected"
+    except (OSError, subprocess.SubprocessError, ValueError, AttributeError, TypeError):
+        evidence["eventCollection"] = "unavailable"
     return evidence
 
 

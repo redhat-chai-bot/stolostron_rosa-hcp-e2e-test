@@ -22,7 +22,7 @@
   when: not (rcp_status.stdout | bool)
 
 - name: Fail if ROSA Control Plane did not become ready
-  fail:
+  ansible.builtin.fail:
     msg: |
       ROSA HCP cluster did not become ready within the timeout period.
 

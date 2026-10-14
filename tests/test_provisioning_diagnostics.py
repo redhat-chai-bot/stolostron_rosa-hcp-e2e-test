@@ -80,6 +80,7 @@ def test_sanitization_is_fail_closed():
     assert result["conditions"][0] == {
         "type": "Ready",
         "status": "False",
+        "reason": "[redacted]",
         "lastTransitionTime": "2026-01-01T00:00:00Z",
     }
     assert len(result["events"]) == 1
@@ -141,6 +142,30 @@ def test_event_failure_retains_status():
     assert SENSITIVE not in json.dumps(result)
 
 
+@pytest.mark.parametrize("invalid_events", [None, {"items": None}, {"items": [None]}])
+def test_invalid_events_do_not_discard_control_plane_status(invalid_events):
+    with patch.object(
+        diagnostics, "get_json", side_effect=[control_plane(), invalid_events]
+    ):
+        result = diagnostics.collect("fixture", "fixture")
+    assert result["state"] == "installing"
+    assert result["ready"] is False
+    assert result["eventCollection"] == "unavailable"
+    assert SENSITIVE not in json.dumps(result)
+
+
+def test_known_reasons_are_retained_without_freeform_text():
+    for reason in diagnostics.CONDITION_REASONS:
+        payload = control_plane()
+        payload["status"]["conditions"][0]["reason"] = reason
+        progress_events = events()
+        progress_events["items"][1]["reason"] = reason
+        result = diagnostics.sanitize(payload, progress_events)
+        assert result["conditions"][0]["reason"] == reason
+        assert result["events"][0]["reason"] == reason
+        assert SENSITIVE not in json.dumps(result)
+
+
 def test_invalid_response_is_not_dumped():
     with patch.object(diagnostics, "get_json", side_effect=[{"status": None}, {}]):
         assert diagnostics.collect("fixture", "fixture") == {
@@ -151,7 +176,7 @@ def test_invalid_response_is_not_dumped():
 @pytest.mark.parametrize(
     "mode", ["success", "failure", "collector-failure", "command-failure"]
 )
-def test_actual_wait_failure_and_runner_cleanup(tmp_path, monkeypatch, mode):
+def test_actual_wait_failure_and_runner_cleanup(tmp_path, monkeypatch, capsys, mode):
     binary_dir = tmp_path / "bin"
     binary_dir.mkdir()
     fake_oc = binary_dir / "oc"
@@ -242,11 +267,16 @@ def test_actual_wait_failure_and_runner_cleanup(tmp_path, monkeypatch, mode):
     assert cleanup["success"]
     assert "CLEANUP_EXECUTED" in cleanup["output"]
     assert SENSITIVE not in provision["output"]
+    transcript = capsys.readouterr().out
+    assert SENSITIVE not in transcript
     if mode == "success":
         assert "--request-timeout" not in calls.read_text()
     else:
         assert "ROSA HCP cluster did not become ready" in provision["error"]
         assert "captured before teardown" in provision["output"]
+        assert transcript.index("captured before teardown") < transcript.index(
+            "CLEANUP_EXECUTED"
+        )
         assert ("--request-timeout=10s" in calls.read_text()) is (
             mode != "command-failure"
         )
